@@ -11,15 +11,17 @@ import re
 import io
 import csv
 import datetime
-import spacy
-import numpy as np
+import shutil
 
-import streamlit as st
+import numpy as np
 import pandas as pd
+import streamlit as st
+
 import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+from PIL import Image, ImageEnhance, ImageOps
 import pytesseract
 import cv2  # pip install opencv-python-headless
 
@@ -28,20 +30,26 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.svm import LinearSVC
 from sklearn.calibration import CalibratedClassifierCV
 
-matplotlib.use("Agg")
+
+# ══════════════════════════════════════════════════════════
+# CONFIG STREAMLIT
+# ══════════════════════════════════════════════════════════
+st.set_page_config(page_title="PFE - Classification Emails", page_icon="📧", layout="wide")
+
 
 # ══════════════════════════════════════════════════════════
 # CONFIGURATION TESSERACT
 # ══════════════════════════════════════════════════════════
-import shutil
 tesseract_path = shutil.which("tesseract")
 if tesseract_path:
     pytesseract.pytesseract.tesseract_cmd = tesseract_path
 else:
-    pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+    pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
-# Formats d'images acceptés (tous les formats courants)
+
+# Formats d'images acceptés
 ACCEPTED_IMAGE_FORMATS = ["png", "jpg", "jpeg", "webp", "bmp", "tiff", "tif"]
+
 
 # ══════════════════════════════════════════════════════════
 # CONFIGURATION
@@ -57,6 +65,7 @@ CSV_COLUMNS = [
     "Langue"
 ]
 
+
 # ══════════════════════════════════════════════════════════
 # DATASET D'ENTRAINEMENT
 # ══════════════════════════════════════════════════════════
@@ -67,17 +76,20 @@ DATASET = [
     ("Pouvez-vous envoyer ma facture ?", "Facturation"),
     ("فاتورتي غير صحيحة.", "Facturation"),
     ("أريد استرداد المبلغ.", "Facturation"),
+
     # TECHNIQUE
     ("Je ne peux pas me connecter.", "Technique"),
     ("Erreur sur le site.", "Technique"),
     ("Le serveur ne fonctionne pas.", "Technique"),
     ("لا أستطيع تسجيل الدخول.", "Technique"),
     ("هناك خطأ في الموقع.", "Technique"),
+
     # RH
     ("Je veux poser un conge.", "RH"),
     ("Je n'ai pas recu mon salaire.", "RH"),
     ("أريد طلب إجازة.", "RH"),
     ("لم أتلق راتبي.", "RH"),
+
     # RECLAMATION
     ("Je suis mecontent du service.", "Reclamation"),
     ("Service catastrophique.", "Reclamation"),
@@ -85,77 +97,76 @@ DATASET = [
     ("أريد تقديم شكوى.", "Reclamation"),
 ]
 
+
 # ══════════════════════════════════════════════════════════
-# FONCTIONS DE TRAITEMENT (PREPROCESSING TEXTE)
+# PREPROCESSING TEXTE
 # ══════════════════════════════════════════════════════════
 def normalize_arabic(text):
-    text = re.sub(r'[إأآا]', 'ا', text)
-    text = re.sub(r'ى', 'ي', text)
-    text = re.sub(r'ة', 'ه', text)
+    text = re.sub(r"[إأآا]", "ا", text)
+    text = re.sub(r"ى", "ي", text)
+    text = re.sub(r"ة", "ه", text)
     return text
+
 
 def preprocess(text):
     text = str(text).lower()
     text = normalize_arabic(text)
-    text = re.sub(r'<[^>]+>', ' ', text)
-    text = re.sub(r'http\S+|www\S+', '', text)
-    text = re.sub(r'\S+@\S+', '', text)
-    text = re.sub(r'\s+', ' ', text).strip()
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"http\S+|www\S+", "", text)
+    text = re.sub(r"\S+@\S+", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
     return text
 
+
 def detect_language(text):
-    if re.search(r'[\u0600-\u06FF]', str(text)):
+    if re.search(r"[\u0600-\u06FF]", str(text)):
         return "Arabe"
     return "Francais"
 
-# ══════════════════════════════════════════════════════════
-# PREPROCESSING IMAGE — AMÉLIORATION AVANT OCR
-# ══════════════════════════════════════════════════════════
 
+# ══════════════════════════════════════════════════════════
+# OCR / IMAGE PROCESSING
+# ══════════════════════════════════════════════════════════
 def pil_to_cv2(pil_img):
-    """Convertit une image PIL en image OpenCV (numpy array BGR)."""
     img_array = np.array(pil_img.convert("RGB"))
     return cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
 
+
 def cv2_to_pil(cv2_img):
-    """Convertit une image OpenCV en image PIL."""
     img_rgb = cv2.cvtColor(cv2_img, cv2.COLOR_BGR2RGB)
     return Image.fromarray(img_rgb)
 
+
 def auto_rotate_image(pil_img):
-    """
-    Corrige automatiquement l'orientation de l'image
-    en utilisant les données EXIF (photos de téléphone).
-    """
     try:
         pil_img = ImageOps.exif_transpose(pil_img)
     except Exception:
         pass
     return pil_img
 
+
 def deskew_image(cv2_img):
-    """
-    Redresse l'image si elle est légèrement inclinée (deskewing).
-    Utile pour les photos de documents prises à la main.
-    """
     try:
         gray = cv2.cvtColor(cv2_img, cv2.COLOR_BGR2GRAY)
         gray = cv2.bitwise_not(gray)
         coords = np.column_stack(np.where(gray > 0))
         if len(coords) == 0:
             return cv2_img
+
         angle = cv2.minAreaRect(coords)[-1]
         if angle < -45:
             angle = -(90 + angle)
         else:
             angle = -angle
-        # On ne redresse que si l'angle est significatif (> 0.5°)
+
         if abs(angle) > 0.5:
-            (h, w) = cv2_img.shape[:2]
+            h, w = cv2_img.shape[:2]
             center = (w // 2, h // 2)
             M = cv2.getRotationMatrix2D(center, angle, 1.0)
             cv2_img = cv2.warpAffine(
-                cv2_img, M, (w, h),
+                cv2_img,
+                M,
+                (w, h),
                 flags=cv2.INTER_CUBIC,
                 borderMode=cv2.BORDER_REPLICATE
             )
@@ -163,50 +174,28 @@ def deskew_image(cv2_img):
         pass
     return cv2_img
 
-def enhance_image_for_ocr(pil_img):
-    """
-    Améliore l'image pour maximiser la précision de l'OCR :
-    1. Correction orientation EXIF
-    2. Conversion en niveaux de gris
-    3. Augmentation du contraste
-    4. Agrandissement si l'image est trop petite
-    5. Débruitage
-    6. Binarisation adaptative (seuil Otsu)
-    7. Redressement (deskew)
-    """
-    # Étape 1 : Corriger l'orientation EXIF
-    pil_img = auto_rotate_image(pil_img)
 
-    # Étape 2 : Convertir en RGB propre
+def enhance_image_for_ocr(pil_img):
+    pil_img = auto_rotate_image(pil_img)
     pil_img = pil_img.convert("RGB")
 
-    # Étape 3 : Agrandir si l'image est trop petite (min 1000px de large)
     w, h = pil_img.size
-    if w < 1000:
+    if w < 1000 and w > 0:
         scale = 1000 / w
         pil_img = pil_img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
 
-    # Étape 4 : Améliorer le contraste
     enhancer = ImageEnhance.Contrast(pil_img)
     pil_img = enhancer.enhance(2.0)
 
-    # Étape 5 : Netteté
     enhancer_sharp = ImageEnhance.Sharpness(pil_img)
     pil_img = enhancer_sharp.enhance(2.0)
 
-    # Étape 6 : Passer en OpenCV pour traitements avancés
     cv2_img = pil_to_cv2(pil_img)
-
-    # Étape 7 : Redressement
     cv2_img = deskew_image(cv2_img)
 
-    # Étape 8 : Niveaux de gris
     gray = cv2.cvtColor(cv2_img, cv2.COLOR_BGR2GRAY)
-
-    # Étape 9 : Débruitage
     gray = cv2.fastNlMeansDenoising(gray, h=10)
 
-    # Étape 10 : Binarisation adaptative (fonctionne mieux sur texte sombre/clair variable)
     binary = cv2.adaptiveThreshold(
         gray, 255,
         cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
@@ -215,40 +204,28 @@ def enhance_image_for_ocr(pil_img):
         C=10
     )
 
-    # Retourner en PIL pour Tesseract
     return Image.fromarray(binary)
 
+
 def detect_image_type(pil_img):
-    """
-    Détecte si l'image est plutôt une capture d'écran
-    ou une photo de document (pour choisir la meilleure config OCR).
-    """
     w, h = pil_img.size
+    if h == 0:
+        return "document"
     aspect = w / h
-    # Captures d'écran sont souvent larges (16:9) ou carrées
     if aspect > 1.5 or aspect < 0.5:
         return "screenshot"
     return "document"
 
+
 def ocr_image(pil_img):
-    """
-    Extrait le texte d'une image avec preprocessing intelligent.
-    Détecte la langue dominante et adapte la config Tesseract.
-    Retourne (texte_extrait, image_preprocessee, mode_utilisé)
-    """
-    # Preprocessing
     preprocessed = enhance_image_for_ocr(pil_img)
     img_type = detect_image_type(pil_img)
 
-    # Configuration Tesseract selon le type d'image
     if img_type == "screenshot":
-        # PSM 6 : bloc de texte uniforme (bon pour captures d'écran)
         config = "--oem 3 --psm 6"
     else:
-        # PSM 3 : segmentation automatique complète (bon pour documents)
         config = "--oem 3 --psm 3"
 
-    # Tentative 1 : Français + Arabe simultané
     try:
         text = pytesseract.image_to_string(preprocessed, lang="fra+ara", config=config)
         if len(text.strip()) > 10:
@@ -256,7 +233,6 @@ def ocr_image(pil_img):
     except Exception:
         pass
 
-    # Tentative 2 : Français seul
     try:
         text = pytesseract.image_to_string(preprocessed, lang="fra", config=config)
         if len(text.strip()) > 10:
@@ -264,20 +240,28 @@ def ocr_image(pil_img):
     except Exception:
         pass
 
-    # Tentative 3 : Sans spécifier la langue (fallback)
+    try:
+        text = pytesseract.image_to_string(preprocessed, lang="ara", config=config)
+        if len(text.strip()) > 10:
+            return text, preprocessed, "ara"
+    except Exception:
+        pass
+
     try:
         text = pytesseract.image_to_string(preprocessed, config=config)
         return text, preprocessed, "auto"
     except Exception as e:
         return "", preprocessed, f"erreur: {e}"
 
+
 # ══════════════════════════════════════════════════════════
-# MODELE IA (TRAINING & PREDICTION)
+# MODELE IA
 # ══════════════════════════════════════════════════════════
 @st.cache_resource
 def train_model():
     texts = [preprocess(t) for t, _ in DATASET]
     labels = [l for _, l in DATASET]
+
     pipeline = Pipeline([
         ("tfidf", TfidfVectorizer(
             analyzer="char_wb",
@@ -287,25 +271,37 @@ def train_model():
         )),
         ("clf", CalibratedClassifierCV(
             LinearSVC(class_weight="balanced", max_iter=2000, C=1.2),
-            cv=3
+            cv=2
         ))
     ])
     pipeline.fit(texts, labels)
     return pipeline
+
 
 def classify(text, model):
     clean = preprocess(text)
     pred = model.predict([clean])[0]
     probs = model.predict_proba([clean])[0]
     scores = dict(zip(model.classes_, probs))
-    conf = scores[pred]
+    conf = float(scores[pred])
+
+    if conf >= 0.75:
+        fiabilite = "Elevee"
+    elif conf >= 0.50:
+        fiabilite = "Moyenne"
+    elif conf >= CONFIDENCE_THRESHOLD:
+        fiabilite = "Faible"
+    else:
+        fiabilite = "Tres faible"
+
     return {
         "pred": pred,
         "confidence": conf,
         "scores": scores,
         "langue": detect_language(text),
-        "fiabilite": "Elevee" if conf >= 0.75 else "Moyenne" if conf >= 0.50 else "Faible"
+        "fiabilite": fiabilite
     }
+
 
 # ══════════════════════════════════════════════════════════
 # GESTION HISTORIQUE ET EXPORT
@@ -320,30 +316,38 @@ def push_history(email_text, result):
         "Langue": result["langue"],
     })
 
+
 def build_csv(rows):
-    buf = io.BytesIO()
-    buf.write(b"\xef\xbb\xbf")
-    wrapper = io.TextIOWrapper(buf, encoding="utf-8", newline="")
-    writer = csv.DictWriter(wrapper, fieldnames=CSV_COLUMNS, delimiter=";", quoting=csv.QUOTE_ALL)
+    buf = io.StringIO()
+    writer = csv.DictWriter(
+        buf,
+        fieldnames=CSV_COLUMNS,
+        delimiter=";",
+        quoting=csv.QUOTE_ALL
+    )
     writer.writeheader()
     for row in rows:
         writer.writerow(row)
-    wrapper.flush()
-    return buf.getvalue()
+
+    csv_text = "\ufeff" + buf.getvalue()
+    return csv_text.encode("utf-8")
+
 
 # ══════════════════════════════════════════════════════════
-# VISUALISATION (GRAPHIQUES)
+# VISUALISATION
 # ══════════════════════════════════════════════════════════
 def fig_scores(scores):
     cats = sorted(scores, key=lambda c: -scores[c])
     vals = [scores[c] for c in cats]
     colors = ["#2ecc71" if v == max(vals) else "#bdc3c7" for v in vals]
+
     fig, ax = plt.subplots(figsize=(6, 3))
     ax.barh(cats, vals, color=colors)
     ax.set_xlim(0, 1)
     ax.set_title("Probabilités par catégorie")
     plt.tight_layout()
     return fig
+
 
 def fig_history(history):
     df = pd.DataFrame(history)
@@ -358,33 +362,52 @@ def fig_history(history):
         return fig
     return None
 
+
 # ══════════════════════════════════════════════════════════
 # NER — EXTRACTION D'ENTITÉS
 # ══════════════════════════════════════════════════════════
 @st.cache_resource
 def load_spacy_model():
-    import spacy as spacy_lib
-    return spacy_lib.load("fr_core_news_sm")
+    try:
+        import spacy
+        return spacy.load("fr_core_news_sm")
+    except Exception:
+        return None
 
-nlp = load_spacy_model()
 
 def extract_entities(text):
-    doc = nlp(text)
     entities = []
-    for ent in doc.ents:
-        if ent.label_ in ["PER", "ORG", "LOC", "DATE", "MISC"]:
-            label_map = {
-                "PER": "Personne",
-                "ORG": "Organisation/Entreprise",
-                "LOC": "Lieu",
-                "DATE": "Date/Heure",
-                "MISC": "Référence/Divers"
-            }
-            entities.append({"Entité": ent.text, "Type": label_map.get(ent.label_, ent.label_)})
-    invoice_match = re.findall(r'(?:facture|n°|numéro)\s*[:#-]?\s*([A-Z0-9-]+)', text, re.IGNORECASE)
+    nlp = load_spacy_model()
+
+    if nlp is not None:
+        try:
+            doc = nlp(text)
+            for ent in doc.ents:
+                if ent.label_ in ["PER", "ORG", "LOC", "DATE", "MISC"]:
+                    label_map = {
+                        "PER": "Personne",
+                        "ORG": "Organisation/Entreprise",
+                        "LOC": "Lieu",
+                        "DATE": "Date/Heure",
+                        "MISC": "Référence/Divers"
+                    }
+                    entities.append({
+                        "Entité": ent.text,
+                        "Type": label_map.get(ent.label_, ent.label_)
+                    })
+        except Exception:
+            pass
+
+    invoice_match = re.findall(
+        r"(?:facture|n°|numéro)\s*[:#-]?\s*([A-Z0-9-]+)",
+        text,
+        re.IGNORECASE
+    )
     for num in invoice_match:
         entities.append({"Entité": num, "Type": "Numéro de Facture (Détecté)"})
+
     return entities
+
 
 def display_ner_section(text):
     st.subheader("🔍 Extraction d'informations clés (NER)")
@@ -394,15 +417,11 @@ def display_ner_section(text):
             df_ner = pd.DataFrame(data).drop_duplicates()
             st.table(df_ner)
         else:
-            st.info("Aucune entité spécifique (nom, date, entreprise) détectée.")
+            st.info("Aucune entité spécifique détectée ou modèle spaCy indisponible.")
+
 
 # ══════════════════════════════════════════════════════════
-# INTERFACE UTILISATEUR STREAMLIT
-# ══════════════════════════════════════════════════════════
-st.set_page_config(page_title="PFE - Classification Emails", page_icon="📧", layout="wide")
-
-# ══════════════════════════════════════════════════════════
-# INTERFACE CSS PERSONNALISÉE
+# STYLE CSS
 # ══════════════════════════════════════════════════════════
 st.markdown("""
 <style>
@@ -618,11 +637,16 @@ h2, h3 {
 </div>
 """, unsafe_allow_html=True)
 
+
+# ══════════════════════════════════════════════════════════
+# SESSION
+# ══════════════════════════════════════════════════════════
 if "history" not in st.session_state:
     st.session_state.history = []
 
 if "user_info" not in st.session_state:
     st.session_state.user_info = None
+
 
 # ══════════════════════════════════════════════════════════
 # PAGE DE GARDE
@@ -711,7 +735,13 @@ def show_landing_page():
         ], label_visibility="collapsed")
 
         st.markdown("**Objet de l'utilisation**")
-        objet = st.text_area("", placeholder="Ex: Classification automatique des emails clients pour réduire le temps de traitement...", height=90, key="objet_input", label_visibility="collapsed")
+        objet = st.text_area(
+            "",
+            placeholder="Ex: Classification automatique des emails clients pour réduire le temps de traitement...",
+            height=90,
+            key="objet_input",
+            label_visibility="collapsed"
+        )
 
         st.markdown("<br>", unsafe_allow_html=True)
         submitted = st.form_submit_button("Accéder à l'application", use_container_width=True)
@@ -734,33 +764,45 @@ def show_landing_page():
                 }
                 st.rerun()
 
+
 if st.session_state.user_info is None:
     show_landing_page()
     st.stop()
 
-# Afficher les infos utilisateur dans la sidebar
-if st.session_state.user_info is not None:
-    with st.sidebar:
-        u = st.session_state.user_info
-        st.markdown(f"""
-        <div style='background:#111827;border:1px solid #1e2640;border-radius:12px;padding:16px;margin-bottom:16px;'>
-            <div style='font-family:Syne,sans-serif;font-size:0.75rem;color:#3b82f6;text-transform:uppercase;letter-spacing:1px;margin-bottom:10px;'>Session active</div>
-            <div style='font-weight:600;color:#fff;font-size:0.95rem;'>{u['nom']}</div>
-            <div style='color:#6b7ab8;font-size:0.8rem;margin-top:4px;'>{u['email']}</div>
-            <div style='color:#6b7ab8;font-size:0.8rem;'>{u['secteur']}</div>
-            <div style='color:#4b5563;font-size:0.75rem;margin-top:8px;'>Connecté le {u['date']}</div>
-        </div>
-        """, unsafe_allow_html=True)
-        if st.button("Deconnexion", use_container_width=True):
-            st.session_state.user_info = None
-            st.rerun()
 
+# ══════════════════════════════════════════════════════════
+# SIDEBAR
+# ══════════════════════════════════════════════════════════
+with st.sidebar:
+    u = st.session_state.user_info
+    st.markdown(f"""
+    <div style='background:#111827;border:1px solid #1e2640;border-radius:12px;padding:16px;margin-bottom:16px;'>
+        <div style='font-family:Syne,sans-serif;font-size:0.75rem;color:#3b82f6;text-transform:uppercase;letter-spacing:1px;margin-bottom:10px;'>Session active</div>
+        <div style='font-weight:600;color:#fff;font-size:0.95rem;'>{u['nom']}</div>
+        <div style='color:#6b7ab8;font-size:0.8rem;margin-top:4px;'>{u['email']}</div>
+        <div style='color:#6b7ab8;font-size:0.8rem;'>{u['secteur']}</div>
+        <div style='color:#4b5563;font-size:0.75rem;margin-top:8px;'>Connecté le {u['date']}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    if st.button("Deconnexion", use_container_width=True):
+        st.session_state.user_info = None
+        st.rerun()
+
+
+# ══════════════════════════════════════════════════════════
+# INITIALISATION MODELE
+# ══════════════════════════════════════════════════════════
 try:
     model = train_model()
 except Exception as e:
     st.error(f"Erreur lors de l'initialisation du modèle : {e}")
     st.stop()
 
+
+# ══════════════════════════════════════════════════════════
+# TABS
+# ══════════════════════════════════════════════════════════
 tab1, tab2, tab3, tab4 = st.tabs([
     "Analyse Unique",
     "Analyse Batch / CSV",
@@ -768,97 +810,123 @@ tab1, tab2, tab3, tab4 = st.tabs([
     "Historique & Stats"
 ])
 
-# --- TAB 1 : ANALYSE UNIQUE ---
+
+# ──────────────────────────────────────────────────────────
+# TAB 1 : ANALYSE UNIQUE
+# ──────────────────────────────────────────────────────────
 with tab1:
     st.subheader("Analyse de texte direct")
     email_input = st.text_area("Collez l'email ici :", height=150, key="unique_input")
+
     if st.button("Analyser l'email"):
         if email_input.strip():
             result = classify(email_input, model)
             push_history(email_input, result)
+
             c1, c2, c3 = st.columns(3)
             c1.metric("Catégorie", result["pred"])
             c2.metric("Confiance", f"{result['confidence']:.0%}")
             c3.metric("Langue", result["langue"])
-            st.pyplot(fig_scores(result["scores"]))
+
+            fig = fig_scores(result["scores"])
+            st.pyplot(fig)
+            plt.close(fig)
+
             display_ner_section(email_input)
         else:
             st.warning("Veuillez saisir du texte.")
 
-# --- TAB 2 : BATCH ---
+
+# ──────────────────────────────────────────────────────────
+# TAB 2 : BATCH / CSV
+# ──────────────────────────────────────────────────────────
 with tab2:
     st.subheader("Classification de masse")
     source = st.radio("Sélectionnez la source :", ["Saisie Manuelle (lignes)", "Importer Fichier CSV"])
     lines_to_process = []
+
     if source == "Saisie Manuelle (lignes)":
         batch_txt = st.text_area("Entrez un email par ligne :", height=150)
         lines_to_process = [l.strip() for l in batch_txt.splitlines() if l.strip()]
     else:
-        uploaded_file = st.file_uploader("Choisir un fichier CSV", type="csv")
+        uploaded_file = st.file_uploader("Choisir un fichier CSV", type="csv", key="csv_upload")
         if uploaded_file:
-            df_csv = pd.read_csv(uploaded_file)
-            st.write("Aperçu :", df_csv.head(3))
-            col_target = st.selectbox("Colonne contenant les emails :", df_csv.columns)
-            lines_to_process = df_csv[col_target].dropna().tolist()
-    if st.button("Lancer l'analyse batch") and lines_to_process:
-        batch_results = []
-        progress = st.progress(0)
-        for i, line in enumerate(lines_to_process):
-            res = classify(line, model)
-            push_history(line, res)
-            batch_results.append({
-                "Horodatage": datetime.datetime.now().strftime("%H:%M:%S"),
-                "Email": str(line)[:50] + "...",
-                "Categorie": res["pred"],
-                "Confiance (%)": round(res["confidence"] * 100, 1),
-                "Fiabilite": res["fiabilite"],
-                "Langue": res["langue"]
-            })
-            progress.progress((i + 1) / len(lines_to_process))
-        st.success(f"Analyse terminée : {len(batch_results)} lignes traitées.")
-        st.table(pd.DataFrame(batch_results))
+            try:
+                df_csv = pd.read_csv(uploaded_file)
+                st.write("Aperçu :", df_csv.head(3))
+                col_target = st.selectbox("Colonne contenant les emails :", df_csv.columns)
+                lines_to_process = df_csv[col_target].dropna().astype(str).tolist()
+            except Exception as e:
+                st.error(f"Erreur de lecture du CSV : {e}")
 
-# --- TAB 3 : IMAGE OCR (AMÉLIORÉ) ---
+    if st.button("Lancer l'analyse batch"):
+        if lines_to_process:
+            batch_results = []
+            progress = st.progress(0)
+
+            for i, line in enumerate(lines_to_process):
+                res = classify(line, model)
+                push_history(line, res)
+
+                batch_results.append({
+                    "Horodatage": datetime.datetime.now().strftime("%H:%M:%S"),
+                    "Email": (str(line)[:50] + "...") if len(str(line)) > 50 else str(line),
+                    "Categorie": res["pred"],
+                    "Confiance (%)": round(res["confidence"] * 100, 1),
+                    "Fiabilite": res["fiabilite"],
+                    "Langue": res["langue"]
+                })
+
+                progress.progress((i + 1) / len(lines_to_process))
+
+            st.success(f"Analyse terminée : {len(batch_results)} lignes traitées.")
+            st.table(pd.DataFrame(batch_results))
+        else:
+            st.warning("Aucune ligne à traiter.")
+
+
+# ──────────────────────────────────────────────────────────
+# TAB 3 : IMAGE OCR
+# ──────────────────────────────────────────────────────────
 with tab3:
     st.subheader("Extraction de texte depuis Image")
 
     st.info(
-        f"📎 Formats acceptés : **{', '.join(f'.{f}' for f in ACCEPTED_IMAGE_FORMATS)}**  \n"
+        f"📎 Formats acceptés : **{', '.join(f'.{f}' for f in ACCEPTED_IMAGE_FORMATS)}**\n"
         "🔧 Preprocessing automatique : redressement, contraste, binarisation, débruitage"
     )
 
     img_file = st.file_uploader(
         "Charger une image (capture d'écran, photo, scan, document...)",
-        type=ACCEPTED_IMAGE_FORMATS
+        type=ACCEPTED_IMAGE_FORMATS,
+        key="img_upload"
     )
 
+    img = None
     if img_file:
-        # Ouvrir l'image quelle que soit son extension
         try:
             img = Image.open(img_file)
-            # Convertir en RGB si nécessaire (ex: PNG avec transparence RGBA)
             if img.mode not in ("RGB", "L"):
                 img = img.convert("RGB")
         except Exception as e:
             st.error(f"Impossible d'ouvrir l'image : {e}")
-            st.stop()
+            img = None
 
-        # Affichage côte à côte : original / preprocessé
+    if img is not None:
         col_orig, col_proc = st.columns(2)
+
         with col_orig:
             st.markdown("**Image originale**")
-            st.image(img, use_column_width=True)
+            st.image(img, use_container_width=True)
 
-        # Preprocessing en preview
         try:
             preview_processed = enhance_image_for_ocr(img)
             with col_proc:
                 st.markdown("**Image après preprocessing**")
-                st.image(preview_processed, use_column_width=True)
+                st.image(preview_processed, use_container_width=True)
         except Exception:
-            pass
+            preview_processed = None
 
-        # Options avancées
         with st.expander("⚙️ Options avancées OCR"):
             force_lang = st.selectbox(
                 "Forcer la langue :",
@@ -869,10 +937,8 @@ with tab3:
         if st.button("Extraire et Classifier"):
             with st.spinner("Preprocessing et OCR en cours..."):
                 try:
-                    # Extraction OCR avec preprocessing
                     text_extracted, processed_img, mode_used = ocr_image(img)
 
-                    # Override langue si demandé
                     if force_lang == "Français seulement":
                         text_extracted = pytesseract.image_to_string(
                             processed_img, lang="fra", config="--oem 3 --psm 3"
@@ -891,14 +957,18 @@ with tab3:
 
                     if text_extracted.strip():
                         res_img = classify(text_extracted, model)
+
                         c1, c2, c3 = st.columns(3)
                         c1.metric("Catégorie", res_img["pred"])
                         c2.metric("Confiance", f"{res_img['confidence']:.0%}")
                         c3.metric("Langue détectée", res_img["langue"])
-                        st.pyplot(fig_scores(res_img["scores"]))
+
+                        fig = fig_scores(res_img["scores"])
+                        st.pyplot(fig)
+                        plt.close(fig)
+
                         push_history("IMAGE_OCR: " + text_extracted, res_img)
 
-                        # NER sur le texte extrait
                         if detect_language(text_extracted) == "Francais":
                             display_ner_section(text_extracted)
                     else:
@@ -916,20 +986,27 @@ with tab3:
                         "Et que les langues fra et ara sont installées."
                     )
 
-# --- TAB 4 : HISTORIQUE ---
+
+# ──────────────────────────────────────────────────────────
+# TAB 4 : HISTORIQUE
+# ──────────────────────────────────────────────────────────
 with tab4:
     if st.session_state.history:
         df_hist = pd.DataFrame(st.session_state.history)
-        st.dataframe(df_hist)
+        st.dataframe(df_hist, use_container_width=True)
+
         f_hist = fig_history(st.session_state.history)
         if f_hist:
             st.pyplot(f_hist)
+            plt.close(f_hist)
+
         st.download_button(
             label="Exporter en CSV",
             data=build_csv(st.session_state.history),
             file_name="historique_pfe.csv",
             mime="text/csv"
         )
+
         if st.button("Effacer l'historique"):
             st.session_state.history = []
             st.rerun()
