@@ -1,10 +1,8 @@
-streamlit
-scikit-learn
-pandas
-matplotlib
-pillow
-pytesseract
-opencv-python-headless
-spacy==3.7.4
-fr-core-news-sm @ https://github.com/explosion/spacy-models/releases/download/fr_core_news_sm-3.7.0/fr_core_news_sm-3.7.0-py3-none-any.whl
-numpy
+streamlit==1.45.1
+scikit-learn==1.6.1
+pandas==2.2.3
+matplotlib==3.10.3
+Pillow==11.2.1
+pytesseract==0.3.13
+opencv-python-headless==4.11.0.86
+numpy==1.26.4
